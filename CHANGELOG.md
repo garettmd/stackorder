@@ -4,6 +4,8 @@ All notable changes to this repository are documented here. The format follows [
 
 ## [Unreleased]
 
+- Native GitHub stacked pull requests can show cumulative Terraform plans. The GitHub rollup blocks protected merges and the server refuses applies until the layer has been detached and planned as a standalone PR. Upgrade all servers before enabling the preview and then upgrade any pinned CLI versions. Migration `0017_pr_plan_scope` stores the scope used by each preview. See [Stacked pull requests](docs/configuration/workflows.md#stacked-pull-requests).
+
 ## [0.6.0] - 2026-11-15
 
 **Upgrading from v0.5.0.** Server start applies seven new migrations automatically, under the migration lock, and leaves the schema at version 16; take a database snapshot first, as for any release with migrations. None needs a superuser. Once any of them is applied, a v0.5.0 server refuses to start against the database, so a drained v0.5.0 replica cannot be restarted, and going back means reverting the schema with this release's `stackorder-server migrate --down --to 9 --yes` or restoring the snapshot (see [Rolling back](docs/operations/upgrades-and-backups.md#rollback)).

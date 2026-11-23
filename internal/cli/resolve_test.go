@@ -68,6 +68,57 @@ func installDeps(t *testing.T, d *fakeDeps) *fakeDeps {
 	return d
 }
 
+func TestResolveUsesVerifiedStackTrunk(t *testing.T) {
+	h := newHarness(t)
+	fs := newFakeServer(t)
+	trunk := initGit(t, h.root)
+	for _, path := range []string{"lower.tf", "middle.tf", "upper.tf"} {
+		writeFile(t, filepath.Join(h.root, path), "# "+path)
+		gitRun(t, h.root, "add", path)
+		gitRun(t, h.root, "commit", "-qm", path)
+	}
+	head := gitRun(t, h.root, "rev-parse", "HEAD")
+	parent := gitRun(t, h.root, "rev-parse", "HEAD^")
+	payload := prPayload()
+	pr := payload["pull_request"].(map[string]any)
+	pr["head"].(map[string]any)["sha"] = head
+	pr["base"].(map[string]any)["sha"] = parent
+	h.ci(fs, "pull_request", payload)
+	d := installDeps(t, &fakeDeps{graph: sampleGraph()})
+	changedPaths = func(_ context.Context, root, base, head string) ([]string, error) {
+		d.diffs = append(d.diffs, [2]string{base, head})
+		return strings.Fields(gitRun(t, root, "diff", "--name-only", base, head)), nil
+	}
+	fs.verifiedBase = trunk
+	tree := gitRun(t, h.root, "rev-parse", "HEAD^{tree}")
+	fs.run.StackPreview = &v1.StackPreview{
+		Number: 1, Position: 3, BaseRef: "main", BaseSHA: trunk, ParentSHA: parent, TreeSHA: tree,
+		Layers: []v1.StackLayer{{Number: 5, HeadSHA: gitRun(t, h.root, "rev-parse", "HEAD^^")}, {Number: 6, HeadSHA: parent}, {Number: 7, HeadSHA: head}},
+	}
+
+	r := h.run("resolve")
+	require.Equal(t, 0, r.code, r.stderr)
+	assert.Equal(t, [][2]string{{trunk, "HEAD"}}, d.diffs)
+	require.Len(t, fs.graphs, 1)
+	assert.Equal(t, trunk, fs.graphs[0].BaseSHA)
+	assert.Equal(t, tree, fs.graphs[0].CheckoutTree)
+	assert.Equal(t, []string{"lower.tf", "middle.tf", "upper.tf"}, fs.graphs[0].ChangedPaths)
+
+	r = h.run("resolve", "--base", parent)
+	assert.NotZero(t, r.code)
+	assert.Contains(t, r.stderr, "--base must match the verified base")
+	fs.run.StackPreview.TreeSHA = strings.Repeat("a", 40)
+	r = h.run("resolve")
+	assert.NotZero(t, r.code)
+	assert.Contains(t, r.stderr, "checkout tree does not match")
+	fs.run.StackPreview.TreeSHA = tree
+	fs.run.StackPreview.ParentSHA = strings.Repeat("a", 40)
+	r = h.run("resolve")
+	assert.NotZero(t, r.code)
+	assert.Contains(t, r.stderr, "rebase the GitHub stack")
+	assert.Len(t, fs.graphs, 1)
+}
+
 func TestResolveWithTheServer(t *testing.T) {
 	h := newHarness(t)
 	fs := newFakeServer(t)
@@ -88,7 +139,7 @@ func TestResolveWithTheServer(t *testing.T) {
 	require.Len(t, fs.creates, 1)
 	assert.Equal(t, v1.CreateRunRequest{
 		Repo: "acme/infra", SHA: headSHA, BaseSHA: baseSHA, PRNumber: 7, Mode: v1.ModePlan,
-		Trigger: v1.TriggerPullRequest, WorkflowRunID: 4242, Attempt: 2,
+		Trigger: v1.TriggerPullRequest, WorkflowRunID: 4242, Attempt: 2, SupportsStackPreview: true,
 	}, fs.creates[0])
 	require.Len(t, fs.graphs, 1)
 	up := fs.graphs[0]

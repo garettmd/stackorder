@@ -48,9 +48,14 @@ func (s *Service) HandlePullRequest(ctx context.Context, ev *gh.PullRequestEvent
 	}
 	pr := &ev.PullRequest
 	switch ev.Action {
-	case "opened", "synchronize", "reopened":
+	case "opened", "synchronize", "reopened", "edited", "stacked", "unstacked":
 		if pr.IsFork() {
 			return s.forkNotice(ctx, repo, pr.HeadSHA)
+		}
+		if pr.Stack != nil || ev.Action == "stacked" || ev.Action == "unstacked" || ev.Action == "edited" || ev.Action == "synchronize" {
+			if err := s.syncPRScopeEvent(ctx, repo, pr.Number); err != nil {
+				return err
+			}
 		}
 		if ev.Action != "synchronize" {
 			return nil
@@ -68,6 +73,12 @@ func (s *Service) HandlePullRequest(ctx context.Context, ev *gh.PullRequestEvent
 	case "closed":
 		if repo, err = s.syncDefaultBranch(ctx, repo, ev.Repository.DefaultBranch); err != nil {
 			return err
+		}
+		if pr.Merged {
+			skipped, err := s.skipStackedMerge(ctx, repo, pr)
+			if err != nil || skipped {
+				return err
+			}
 		}
 		if pr.Merged && pr.BaseRef == repo.DefaultBranch {
 			return s.onMerged(ctx, repo, ev)
@@ -139,9 +150,13 @@ func (s *Service) recordDefaultGraph(ctx context.Context, repo store.Repo, pr *g
 	if err != nil {
 		return storeErr(err, "plan runs of #%d", pr.Number)
 	}
+	scope, err := prScope(ctx, s.st, repo.ID, pr.Number)
+	if err != nil {
+		return err
+	}
 	var graphID *uuid.UUID
 	for _, r := range runs {
-		if r.GraphID == nil {
+		if r.GraphID == nil || !currentPlanScope(scope, r.PlanGeneration, r.SHA) {
 			continue
 		}
 		if r.SHA == pr.HeadSHA {
@@ -309,6 +324,12 @@ func (s *Service) HandleCheckRun(ctx context.Context, ev *gh.CheckRunEvent) erro
 func (s *Service) checkRunPR(ctx context.Context, repo store.Repo, cr gh.CheckRun) (int, error) {
 	if len(cr.PullRequests) > 0 {
 		return cr.PullRequests[0].Number, nil
+	}
+	if id, ok := strings.CutPrefix(cr.ExternalID, fmt.Sprintf("stackorder-plan:%d:", repo.ID)); ok {
+		number, sha, _ := strings.Cut(id, ":")
+		if pr, err := strconv.Atoi(number); err == nil && pr > 0 && sha == cr.HeadSHA {
+			return pr, nil
+		}
 	}
 	runs, _, err := s.st.ListRuns(ctx, store.RunFilter{RepoID: repo.ID, SHA: cr.HeadSHA, Mode: v1.ModePlan, Limit: 20})
 	if err != nil {

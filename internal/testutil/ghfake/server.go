@@ -160,6 +160,8 @@ type repoState struct {
 	repo          gh.Repository
 	installation  int64
 	pulls         map[int]*gh.PullRequest
+	pullStacks    map[int]gh.PullStack
+	gitCommits    map[string]gh.GitCommit
 	reviews       map[int][]gh.Review
 	files         map[int][]string
 	comments      []*storedComment
@@ -396,6 +398,8 @@ func (s *Server) ensureRepo(full string) *repoState {
 			HTMLURL:       "https://github.com/" + full,
 		},
 		pulls:         map[int]*gh.PullRequest{},
+		pullStacks:    map[int]gh.PullStack{},
+		gitCommits:    map[string]gh.GitCommit{},
 		reviews:       map[int][]gh.Review{},
 		files:         map[int][]string{},
 		collaborators: map[string]string{},
@@ -461,6 +465,22 @@ func (s *Server) SetPull(repo string, pr gh.PullRequest) {
 	}
 	pr.Labels = slices.Clone(pr.Labels)
 	rs.pulls[pr.Number] = &pr
+}
+
+// SetPullStack sets the response for a native GitHub pull request stack.
+func (s *Server) SetPullStack(repo string, stack gh.PullStack) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	stack.Pulls = slices.Clone(stack.Pulls)
+	s.ensureRepo(repo).pullStacks[stack.Number] = stack
+}
+
+// SetGitCommit sets a commit's tree and ordered parents.
+func (s *Server) SetGitCommit(repo string, commit gh.GitCommit) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	commit.Parents = slices.Clone(commit.Parents)
+	s.ensureRepo(repo).gitCommits[commit.SHA] = commit
 }
 
 // SetReviews replaces the reviews of a pull request.

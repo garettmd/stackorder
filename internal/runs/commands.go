@@ -218,9 +218,23 @@ func (s *Service) planPullRequest(ctx context.Context, repo store.Repo, c *gh.Cl
 		title, _ := report.ForkNotice()
 		return store.Run{}, title + ".", nil
 	}
+	scope, err := prScope(ctx, s.st, repo.ID, pr)
+	if err != nil {
+		return store.Run{}, "", err
+	}
+	preview, err := liveStackPreview(ctx, c, repo, pull)
+	if err != nil {
+		return store.Run{}, "", err
+	}
+	if !scopeMatches(scope, pull, preview) {
+		return store.Run{}, stackReplan, nil
+	}
 	view, err := planViewAt(ctx, s.st, repo.ID, pr, pull.HeadSHA)
 	if err != nil {
 		return store.Run{}, "", err
+	}
+	if scope.Generation != uuid.Nil && (len(view.runs) == 0 || len(view.keys()) == 0) {
+		return store.Run{}, stackReplan, nil
 	}
 	g, graphID, err := s.headGraph(ctx, repo, view, pull.HeadSHA)
 	if errors.Is(err, store.ErrNotFound) {
@@ -232,6 +246,9 @@ func (s *Service) planPullRequest(ctx context.Context, repo store.Repo, c *gh.Cl
 	req := serverPlan{
 		repo: repo, pr: pr, sha: pull.HeadSHA, baseSHA: pull.BaseSHA, graph: g, graphID: graphID,
 		keys: keys, prior: view.stored, trigger: trigger, requester: login,
+	}
+	if scope.Generation != uuid.Nil {
+		req.generation, req.preview, req.baseSHA = &scope.Generation, scope.Preview, view.runs[0].BaseSHA
 	}
 	if len(req.keys) == 0 {
 		req.keys = view.keys()
@@ -262,19 +279,21 @@ func (s *Service) headGraph(ctx context.Context, repo store.Repo, view planView,
 }
 
 type serverPlan struct {
-	repo      store.Repo
-	pr        int
-	sha       string
-	baseSHA   string
-	graph     *v1.Graph
-	graphID   uuid.UUID
-	keys      []string
-	changed   []string
-	prior     map[string]store.RunStack
-	trigger   v1.Trigger
-	requester string
-	warnings  []string
-	claim     func(ctx context.Context, tx *store.Store) (bool, error)
+	generation *uuid.UUID
+	preview    *v1.StackPreview
+	repo       store.Repo
+	pr         int
+	sha        string
+	baseSHA    string
+	graph      *v1.Graph
+	graphID    uuid.UUID
+	keys       []string
+	changed    []string
+	prior      map[string]store.RunStack
+	trigger    v1.Trigger
+	requester  string
+	warnings   []string
+	claim      func(ctx context.Context, tx *store.Store) (bool, error)
 }
 
 var errPlanClaimed = errors.New("runs: plan already started")
@@ -306,8 +325,23 @@ func (s *Service) startServerPlan(ctx context.Context, req serverPlan) (store.Ru
 		rows = append(rows, row)
 	}
 	warnings := slices.Concat(req.warnings, resp.Warnings)
+	if req.preview != nil && len(req.keys) > 0 {
+		warnings = append(warnings, "Preview rerun for "+strings.Join(req.keys, ", ")+".")
+	}
 	var run store.Run
 	err = s.st.InTx(ctx, func(tx *store.Store) error {
+		if req.pr > 0 {
+			if err := tx.LockKey(ctx, renderKey(store.Run{RepoID: req.repo.ID, PRNumber: req.pr})); err != nil {
+				return err
+			}
+			scope, err := prScope(ctx, tx, req.repo.ID, req.pr)
+			if err != nil {
+				return err
+			}
+			if !currentPlanScope(scope, req.generation, req.sha) {
+				return principal.Wrap(principal.ErrSuperseded, "%s", stackReplan)
+			}
+		}
 		if req.claim != nil {
 			first, err := req.claim(ctx, tx)
 			if err != nil {
@@ -321,6 +355,7 @@ func (s *Service) startServerPlan(ctx context.Context, req serverPlan) (store.Ru
 		run, err = tx.CreateRun(ctx, store.CreateRunParams{
 			RepoID: req.repo.ID, SHA: req.sha, BaseSHA: req.baseSHA, PRNumber: req.pr,
 			Trigger: req.trigger, Mode: v1.ModePlan, Status: v1.RunPending, RequestedBy: req.requester,
+			PlanGeneration: req.generation, StackPreview: req.preview,
 		})
 		if err != nil {
 			return err
@@ -368,7 +403,14 @@ func planRefusal(resp *v1.ResolveResponse, rerr error, req serverPlan) string {
 
 func (s *Service) commandApply(ctx context.Context, repo store.Repo, c *gh.Client, pr int, cmd *command.Command, login string) (commandOutcome, error) {
 	if repoConfig(repo).Apply.Mode == v1.ApplyOnMerge {
+		pull, err := c.GetPull(ctx, repo.FullName, pr)
+		if err != nil {
+			return commandOutcome{}, err
+		}
 		reason := "This repository applies on merge (`apply.mode: on_merge`), so the apply starts when the pull request is merged."
+		if pull.Stack != nil {
+			reason = stackPreviewOnly
+		}
 		s.comment(ctx, repo, pr, refusalText(cmd.String(), reason))
 		return commandOutcome{reason: reason}, nil
 	}
@@ -431,6 +473,7 @@ func (s *Service) startApply(ctx context.Context, req applyRequest) (store.Run, 
 	if !ok {
 		return store.Run{}, []report.GateFailure{{Layer: report.LayerPlans, Reason: "the plans of the head commit have no graph"}}, nil
 	}
+	generation := req.view.runs[0].PlanGeneration
 	g, err := s.st.GetGraphByID(ctx, graphID)
 	if err != nil {
 		return store.Run{}, nil, storeErr(err, "graph %s", graphID)
@@ -478,6 +521,16 @@ func (s *Service) startApply(ctx context.Context, req applyRequest) (store.Run, 
 		if err := tx.LockKey(ctx, fmt.Sprintf("apply:%d:%d", req.repo.ID, req.pr)); err != nil {
 			return err
 		}
+		if err := tx.LockKey(ctx, renderKey(store.Run{RepoID: req.repo.ID, PRNumber: req.pr})); err != nil {
+			return err
+		}
+		scope, err := prScope(ctx, tx, req.repo.ID, req.pr)
+		if err != nil {
+			return err
+		}
+		if scope.Preview != nil || scope.Generation != uuid.Nil && !sameGeneration(&scope.Generation, generation) {
+			return principal.Wrap(principal.ErrSuperseded, "%s", stackReplan)
+		}
 		active, found, err := activeApply(ctx, tx, req.repo.ID, req.pr, s.now())
 		if err != nil {
 			return err
@@ -488,7 +541,7 @@ func (s *Service) startApply(ctx context.Context, req applyRequest) (store.Run, 
 		}
 		run, err = tx.CreateRun(ctx, store.CreateRunParams{
 			RepoID: req.repo.ID, SHA: req.sha, BaseSHA: req.baseSHA, PRNumber: req.pr,
-			Trigger: req.trigger, Mode: v1.ModeApply, Status: v1.RunPending, RequestedBy: req.requester,
+			Trigger: req.trigger, Mode: v1.ModeApply, Status: v1.RunPending, RequestedBy: req.requester, PlanGeneration: generation,
 		})
 		if err != nil {
 			return err

@@ -11,6 +11,7 @@ import (
 
 	v1 "github.com/stackorder/stackorder/api/v1"
 	"github.com/stackorder/stackorder/internal/config"
+	"github.com/stackorder/stackorder/internal/gh"
 	"github.com/stackorder/stackorder/internal/graph"
 	"github.com/stackorder/stackorder/internal/principal"
 	"github.com/stackorder/stackorder/internal/store"
@@ -51,6 +52,39 @@ func (s *Service) UploadGraph(ctx context.Context, p principal.Principal, runID 
 	}
 	if run.Mode != v1.ModePlan || run.Status != v1.RunPending && run.Status != v1.RunPlanning {
 		return nil, principal.Wrap(principal.ErrConflict, "run %s is a %s run in status %s and takes no graph", run.ID, run.Mode, run.Status)
+	}
+	scope, err := prScope(ctx, s.st, run.RepoID, run.PRNumber)
+	if err != nil {
+		return nil, err
+	}
+	if !currentPlanScope(scope, run.PlanGeneration, run.SHA) {
+		return nil, principal.Wrap(principal.ErrSuperseded, "%s", stackReplan)
+	}
+	if run.PlanGeneration != nil && (run.BaseSHA == "" || req.BaseSHA != run.BaseSHA) {
+		return nil, &principal.InvalidError{Field: "base_sha", Reason: "must match the verified plan base"}
+	}
+	if run.StackPreview != nil && run.StackPreview.TreeSHA != "" {
+		if req.CheckoutTree != run.StackPreview.TreeSHA {
+			return nil, &principal.InvalidError{Field: "checkout_tree", Reason: "must match the verified GitHub tree; upgrade the plan CLI and rerun"}
+		}
+		client, err := s.client(ctx, repo)
+		if err != nil {
+			return nil, err
+		}
+		pull, err := client.GetPull(ctx, repo.FullName, run.PRNumber)
+		if err != nil {
+			return nil, err
+		}
+		preview, err := liveStackPreview(ctx, client, repo, pull)
+		if err != nil {
+			return nil, err
+		}
+		if pull.State != gh.IssueOpen || !scopeMatches(scope, pull, preview) {
+			return nil, principal.Wrap(principal.ErrSuperseded, "%s", stackReplan)
+		}
+	}
+	if run.PlanGeneration != nil && run.StackPreview == nil && len(req.Stacks) > 0 {
+		return nil, &principal.InvalidError{Field: "stacks", Reason: "run a full standalone plan after leaving a GitHub stack"}
 	}
 	g := req.Graph
 	switch {
@@ -133,6 +167,9 @@ func (s *Service) UploadGraph(ctx context.Context, p principal.Principal, runID 
 		}
 		s.renderQuiet(ctx, run.ID, renderOpts{resolveErr: rerr})
 		return nil, &principal.InvalidError{Field: "graph", Reason: rerr.Error()}
+	}
+	if run.StackPreview != nil && len(req.Stacks) > 0 {
+		resp.Warnings = append(resp.Warnings, "Targeted preview for "+strings.Join(req.Stacks, ", ")+".")
 	}
 	if err := s.enforcePlanOutput(ctx, repo, resp.Affected); err != nil {
 		return nil, err

@@ -63,22 +63,24 @@ func statusesWhere[T ~string](all []T, keep func(T) bool) []string {
 
 // Run is one run of a repository at a commit.
 type Run struct {
-	ID                 uuid.UUID    `db:"id"`
-	RepoID             int64        `db:"repo_id"`
-	Repo               string       `db:"repo"`
-	SHA                string       `db:"sha"`
-	BaseSHA            string       `db:"base_sha"`
-	PRNumber           int          `db:"pr_number"`
-	Trigger            v1.Trigger   `db:"trigger"`
-	Mode               v1.RunMode   `db:"mode"`
-	Status             v1.RunStatus `db:"status"`
-	RequestedBy        string       `db:"requested_by"`
-	GraphID            *uuid.UUID   `db:"graph_id"`
-	Waves              int          `db:"waves"`
-	CurrentWave        int          `db:"current_wave"`
-	Warnings           []string     `db:"warnings"`
-	WorkflowRunID      int64        `db:"workflow_run_id"`
-	WorkflowRunAttempt int          `db:"workflow_run_attempt"`
+	ID                 uuid.UUID        `db:"id"`
+	RepoID             int64            `db:"repo_id"`
+	Repo               string           `db:"repo"`
+	SHA                string           `db:"sha"`
+	BaseSHA            string           `db:"base_sha"`
+	PlanGeneration     *uuid.UUID       `db:"plan_generation"`
+	StackPreview       *v1.StackPreview `db:"stack_preview"`
+	PRNumber           int              `db:"pr_number"`
+	Trigger            v1.Trigger       `db:"trigger"`
+	Mode               v1.RunMode       `db:"mode"`
+	Status             v1.RunStatus     `db:"status"`
+	RequestedBy        string           `db:"requested_by"`
+	GraphID            *uuid.UUID       `db:"graph_id"`
+	Waves              int              `db:"waves"`
+	CurrentWave        int              `db:"current_wave"`
+	Warnings           []string         `db:"warnings"`
+	WorkflowRunID      int64            `db:"workflow_run_id"`
+	WorkflowRunAttempt int              `db:"workflow_run_attempt"`
 	// CheckRuns maps the names of the GitHub check runs created for the
 	// run to their ids.
 	CheckRuns map[string]int64 `db:"check_runs"`
@@ -97,20 +99,21 @@ type Run struct {
 // view.
 func (r Run) ToV1() v1.Run {
 	out := v1.Run{
-		ID:          r.ID.String(),
-		Repo:        r.Repo,
-		SHA:         r.SHA,
-		BaseSHA:     r.BaseSHA,
-		PRNumber:    r.PRNumber,
-		Trigger:     r.Trigger,
-		Mode:        r.Mode,
-		Status:      r.Status,
-		RequestedBy: r.RequestedBy,
-		CreatedAt:   r.CreatedAt.UTC(),
-		StartedAt:   utc(r.StartedAt),
-		FinishedAt:  utc(r.FinishedAt),
-		Waves:       r.Waves,
-		CurrentWave: r.CurrentWave,
+		ID:           r.ID.String(),
+		Repo:         r.Repo,
+		SHA:          r.SHA,
+		BaseSHA:      r.BaseSHA,
+		StackPreview: r.StackPreview,
+		PRNumber:     r.PRNumber,
+		Trigger:      r.Trigger,
+		Mode:         r.Mode,
+		Status:       r.Status,
+		RequestedBy:  r.RequestedBy,
+		CreatedAt:    r.CreatedAt.UTC(),
+		StartedAt:    utc(r.StartedAt),
+		FinishedAt:   utc(r.FinishedAt),
+		Waves:        r.Waves,
+		CurrentWave:  r.CurrentWave,
 	}
 	if len(r.Warnings) > 0 {
 		out.Warnings = r.Warnings
@@ -123,6 +126,8 @@ type CreateRunParams struct {
 	RepoID             int64
 	SHA                string
 	BaseSHA            string
+	PlanGeneration     *uuid.UUID
+	StackPreview       *v1.StackPreview
 	PRNumber           int
 	Trigger            v1.Trigger
 	Mode               v1.RunMode
@@ -148,7 +153,7 @@ type RunFilter struct {
 const runCols = `r.id, r.repo_id, p.full_name AS repo, r.sha, r.base_sha, r.pr_number, r.trigger,
 	r.mode, r.status, r.requested_by, r.graph_id, r.waves, r.current_wave, r.warnings,
 	r.workflow_run_id, r.workflow_run_attempt, r.check_runs, r.created_at, r.started_at, r.finished_at,
-	r.comment_id`
+	r.comment_id, r.plan_generation, r.stack_preview`
 
 const runSelect = `SELECT ` + runCols + ` FROM runs r JOIN repos p ON p.id = r.repo_id`
 
@@ -167,14 +172,14 @@ func (s *Store) CreateRun(ctx context.Context, p CreateRunParams) (Run, error) {
 	out, err := queryOne[Run](ctx, s.db, `
 		WITH r AS (
 			INSERT INTO runs (repo_id, sha, base_sha, pr_number, trigger, mode, status, requested_by,
-			                  workflow_run_id, workflow_run_attempt, started_at, finished_at)
+			                  workflow_run_id, workflow_run_attempt, started_at, finished_at, plan_generation, stack_preview)
 			VALUES ($1, $2, $3, $4, $5, $6, $7::text, $8, $9, $10,
 			        CASE WHEN $7::text = ANY($11::text[]) THEN now() END,
-			        CASE WHEN $7::text = ANY($12::text[]) THEN now() END)
+			        CASE WHEN $7::text = ANY($12::text[]) THEN now() END, $13, $14)
 			RETURNING *
 		)`+runFromCTE,
 		p.RepoID, p.SHA, p.BaseSHA, p.PRNumber, p.Trigger, p.Mode, p.Status, p.RequestedBy,
-		p.WorkflowRunID, p.WorkflowRunAttempt, startedStatuses, finishedRunStatuses)
+		p.WorkflowRunID, p.WorkflowRunAttempt, startedStatuses, finishedRunStatuses, p.PlanGeneration, p.StackPreview)
 	return out, wrap(op, err)
 }
 

@@ -31,7 +31,8 @@ type Context struct {
 	// EventName is GITHUB_EVENT_NAME, such as pull_request.
 	EventName string
 	// PRNumber is the pull request number, or 0.
-	PRNumber int
+	PRNumber     int
+	StackPreview *v1.StackPreview
 	// BaseSHA is the pull request base commit, or the before commit of a
 	// push.
 	BaseSHA string
@@ -73,7 +74,15 @@ type eventPayload struct {
 	After       string `json:"after"`
 	PullRequest *struct {
 		Number int `json:"number"`
-		Head   struct {
+		Stack  *struct {
+			Number   int `json:"number"`
+			Position int `json:"position"`
+			Base     struct {
+				Ref string `json:"ref"`
+				SHA string `json:"sha"`
+			} `json:"base"`
+		} `json:"stack"`
+		Head struct {
 			SHA  string     `json:"sha"`
 			Repo *eventRepo `json:"repo"`
 		} `json:"head"`
@@ -133,6 +142,9 @@ func (c *Context) readEvent(path string) error {
 		c.PRNumber = pr.Number
 		c.HeadSHA = pr.Head.SHA
 		c.BaseSHA = pr.Base.SHA
+		if pr.Stack != nil {
+			c.StackPreview = &v1.StackPreview{Number: pr.Stack.Number, Position: pr.Stack.Position, BaseRef: pr.Stack.Base.Ref, BaseSHA: pr.Stack.Base.SHA, ParentSHA: pr.Base.SHA}
+		}
 		c.SHA = cmp.Or(pr.Head.SHA, c.SHA)
 		switch head, base := pr.Head.Repo, pr.Base.Repo; {
 		case head == nil:

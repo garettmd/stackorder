@@ -92,6 +92,23 @@ func (s *Service) gate(ctx context.Context, in gateInput) (gateResult, error) {
 		pull = p
 	}
 	res.pull = pull
+	if pull != nil {
+		scope, err := prScope(ctx, s.st, in.repo.ID, pull.Number)
+		if err != nil {
+			return res, err
+		}
+		switch {
+		case pull.Stack != nil:
+			res.failures = []report.GateFailure{{Layer: report.LayerPlans, Reason: stackPreviewOnly}}
+			return res, nil
+		case scope.Generation != uuid.Nil && pull.BaseRef != in.repo.DefaultBranch:
+			res.failures = []report.GateFailure{{Layer: report.LayerPlans, Reason: stackRetarget}}
+			return res, nil
+		case !scopeMatches(scope, pull, nil):
+			res.failures = []report.GateFailure{{Layer: report.LayerPlans, Reason: stackReplan}}
+			return res, nil
+		}
+	}
 	var stacks []store.RunStack
 	if in.stacks != nil {
 		stacks = in.stacks

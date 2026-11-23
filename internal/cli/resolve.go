@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	v1 "github.com/stackorder/stackorder/api/v1"
+	"github.com/stackorder/stackorder/internal/client"
 	"github.com/stackorder/stackorder/internal/config"
 )
 
@@ -88,14 +89,56 @@ func (a *app) runResolve(ctx context.Context, o resolveOptions) error {
 	if gh.PushToDefault() {
 		return a.recordDefaultBranchGraph(ctx, gh)
 	}
+	cl, run, reason, err := a.registerResolve(ctx, gh, o.base)
+	if err != nil {
+		return err
+	}
+	base, preview := "", gh.StackPreview
+	if run != nil && run.VerifiedBaseSHA != "" {
+		base = run.VerifiedBaseSHA
+		if run.Run == nil {
+			return failed("the server did not return the pull request plan scope")
+		}
+		preview = run.Run.StackPreview
+	} else if preview != nil {
+		if run != nil {
+			return failed("the server does not support GitHub stack previews; upgrade it before planning this PR")
+		}
+		base = preview.BaseSHA
+	}
+	if preview != nil {
+		if err := a.verifyPreviewCheckout(ctx, gh.SHA, preview); err != nil {
+			return err
+		}
+	}
+	if base != "" {
+		if o.base != "" && a.baseSHA(ctx, o.base) != base {
+			return failed("--base must match the verified base commit %s", base)
+		}
+		o.base = base
+	}
 	sr, err := a.scan(ctx, true, o.base)
 	if err != nil {
 		return err
 	}
 	requested := normalizeKeys(o.stacks)
-	resp, reason, err := a.resolveWithServer(ctx, sr, requested)
-	if err != nil {
-		return err
+	var resp *v1.ResolveResponse
+	if run != nil {
+		upload := v1.GraphUploadRequest{
+			Graph: *sr.graph, ChangedPaths: sr.changed, BaseSHA: a.baseSHA(ctx, sr.base), Config: sr.cfg, Stacks: requested,
+		}
+		if preview != nil {
+			upload.CheckoutTree = preview.TreeSHA
+		}
+		resp, err = cl.UploadGraph(ctx, run.RunID, upload)
+		if isUnreachable(err) {
+			reason = "the server is unreachable: " + err.Error()
+		} else if err != nil {
+			return fmt.Errorf("resolving with the server: %w", err)
+		}
+		if resp != nil && resp.RunID == "" {
+			resp.RunID = run.RunID
+		}
 	}
 	if resp == nil {
 		a.log.Info("resolving locally", "reason", reason)
@@ -105,6 +148,9 @@ func (a *app) runResolve(ctx context.Context, o resolveOptions) error {
 	}
 	if len(resp.Cycles) > 0 {
 		return a.cycleError(resp)
+	}
+	if preview != nil && resp.Unconfirmed {
+		resp.Warnings = append(resp.Warnings, fmt.Sprintf("Cumulative preview for GitHub stack #%d, layer %d, against %s at %s. Stackorder applies are disabled while the PR is in the stack.", preview.Number, preview.Position, preview.BaseRef, shortRef(preview.BaseSHA)))
 	}
 	note := ""
 	if resp.Unconfirmed && gh.CI {
@@ -184,49 +230,68 @@ func shortRef(sha string) string {
 	return sha
 }
 
-func (a *app) resolveWithServer(ctx context.Context, sr *scanResult, requested []string) (*v1.ResolveResponse, string, error) {
+func (a *app) registerResolve(ctx context.Context, gh *Context, base string) (*client.Client, *v1.CreateRunResponse, string, error) {
 	if a.server == "" {
-		return nil, "no server is configured", nil
+		return nil, nil, "no server is configured", nil
 	}
-	if !sr.gh.CI {
-		return nil, "outside GitHub Actions the server takes graphs only from pull request resolve jobs", nil
+	if !gh.CI {
+		return nil, nil, "outside GitHub Actions the server takes graphs only from pull request resolve jobs", nil
 	}
-	cl, err := a.newClient(sr.gh, false)
+	cl, err := a.newClient(gh, false)
 	if err != nil {
-		return nil, "", failed("%w", err)
+		return nil, nil, "", failed("%w", err)
 	}
-	baseSHA := a.baseSHA(ctx, sr.base)
-	cr, err := cl.CreateRun(ctx, v1.CreateRunRequest{
-		Repo:          sr.gh.Repository,
-		SHA:           sr.gh.SHA,
-		BaseSHA:       baseSHA,
-		PRNumber:      sr.gh.PRNumber,
-		Mode:          v1.ModePlan,
-		Trigger:       sr.gh.Trigger(),
-		WorkflowRunID: sr.gh.RunID,
-		Attempt:       sr.gh.RunAttempt,
-		RunID:         sr.gh.DispatchRunID,
+	ref, err := a.baseRef(ctx, gh, base)
+	if err != nil {
+		return nil, nil, "", failed("%w", err)
+	}
+	run, err := cl.CreateRun(ctx, v1.CreateRunRequest{
+		Repo: gh.Repository, SHA: gh.SHA, BaseSHA: a.baseSHA(ctx, ref), PRNumber: gh.PRNumber, Mode: v1.ModePlan,
+		Trigger: gh.Trigger(), WorkflowRunID: gh.RunID, Attempt: gh.RunAttempt, RunID: gh.DispatchRunID,
+		SupportsStackPreview: true,
 	})
-	var resp *v1.ResolveResponse
-	if err == nil {
-		resp, err = cl.UploadGraph(ctx, cr.RunID, v1.GraphUploadRequest{
-			Graph:        *sr.graph,
-			ChangedPaths: sr.changed,
-			BaseSHA:      baseSHA,
-			Config:       sr.cfg,
-			Stacks:       requested,
-		})
-	}
 	switch {
 	case err == nil:
-		if resp.RunID == "" {
-			resp.RunID = cr.RunID
-		}
-		return resp, "", nil
+		return cl, run, "", nil
 	case isUnreachable(err):
-		return nil, "the server is unreachable: " + err.Error(), nil
+		return nil, nil, "the server is unreachable: " + err.Error(), nil
 	}
-	return nil, "", fmt.Errorf("resolving with the server: %w", err)
+	return nil, nil, "", fmt.Errorf("resolving with the server: %w", err)
+}
+
+func (a *app) verifyPreviewCheckout(ctx context.Context, head string, scope *v1.StackPreview) error {
+	checkedOut, err := revParse(ctx, a.root, "HEAD")
+	if err != nil || !hexSHA.MatchString(head) || checkedOut != head {
+		return failed("check out pull request head %s before planning this GitHub stack", head)
+	}
+	if scope.TreeSHA != "" {
+		tree, err := gitOutput(ctx, a.root, "rev-parse", "--verify", "HEAD^{tree}")
+		if err != nil || tree != scope.TreeSHA {
+			return failed("the checkout tree does not match GitHub's verified tree for %s", shortRef(head))
+		}
+	}
+	for _, base := range []string{scope.BaseSHA, scope.ParentSHA} {
+		if !hexSHA.MatchString(base) {
+			return failed("GitHub did not provide a valid stack base or parent commit; rerun the full plan workflow")
+		}
+		if _, err := gitOutput(ctx, a.root, "merge-base", "--is-ancestor", base, head); err != nil {
+			return failed("stack base or parent %s is missing from the pull request head's ancestry; fetch full history, rebase the GitHub stack, and rerun the plan", shortRef(base))
+		}
+	}
+	parent := scope.BaseSHA
+	for _, layer := range scope.Layers {
+		if !hexSHA.MatchString(layer.HeadSHA) || layer.HeadSHA == parent {
+			return failed("GitHub did not provide a valid head for stacked pull request #%d", layer.Number)
+		}
+		if _, err := gitOutput(ctx, a.root, "merge-base", "--is-ancestor", parent, layer.HeadSHA); err != nil {
+			return failed("the head of stacked pull request #%d does not descend from %s; rebase the GitHub stack and rerun the plan", layer.Number, shortRef(parent))
+		}
+		parent = layer.HeadSHA
+	}
+	if len(scope.Layers) > 0 && parent != head {
+		return failed("the verified GitHub stack does not end at the checked out head")
+	}
+	return nil
 }
 
 func (a *app) resolveLocally(sr *scanResult, requested []string) (*v1.ResolveResponse, error) {

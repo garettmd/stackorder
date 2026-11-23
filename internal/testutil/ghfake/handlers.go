@@ -64,6 +64,7 @@ func (s *Server) routes() {
 	s.handle("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", authToken, s.listCheckRuns)
 
 	s.handle("GET /repos/{owner}/{repo}/pulls/{pull_number}", authToken, s.getPull)
+	s.handle("GET /repos/{owner}/{repo}/stacks/{stack_number}", authToken, s.getPullStack)
 	s.handle("GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews", authToken, s.listReviews)
 	s.handle("GET /repos/{owner}/{repo}/pulls/{pull_number}/files", authToken, s.listFiles)
 
@@ -91,6 +92,7 @@ func (s *Server) routes() {
 	s.handle("GET /repos/{owner}/{repo}/contents/{path...}", authToken, s.getContents)
 	s.handle("GET /repos/{owner}/{repo}/tags", authToken, s.listTags)
 	s.handle("GET /repos/{owner}/{repo}/git/ref/{ref...}", authToken, s.getRef)
+	s.handle("GET /repos/{owner}/{repo}/git/commits/{commit_sha}", authToken, s.getGitCommit)
 
 	s.handle("POST /login/oauth/access_token", authNone, s.oauthToken)
 	s.handle("GET /user", authUser, s.getUser)
@@ -651,6 +653,35 @@ func (s *Server) getPull(w http.ResponseWriter, r *http.Request, c *caller) {
 	if _, pr, ok := s.pullFor(w, r, c); ok {
 		writeJSON(w, http.StatusOK, pr)
 	}
+}
+
+func (s *Server) getPullStack(w http.ResponseWriter, r *http.Request, c *caller) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rs, ok := s.repoFor(w, r, c)
+	if !ok {
+		return
+	}
+	number, _ := strconv.Atoi(r.PathValue("stack_number"))
+	if stack, ok := rs.pullStacks[number]; ok {
+		writeJSON(w, http.StatusOK, stack)
+		return
+	}
+	writeError(w, http.StatusNotFound, "Stack not found")
+}
+
+func (s *Server) getGitCommit(w http.ResponseWriter, r *http.Request, c *caller) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rs, ok := s.repoFor(w, r, c)
+	if !ok {
+		return
+	}
+	if commit, ok := rs.gitCommits[r.PathValue("commit_sha")]; ok {
+		writeJSON(w, http.StatusOK, commit)
+		return
+	}
+	writeError(w, http.StatusNotFound, "Commit not found")
 }
 
 func (s *Server) listReviews(w http.ResponseWriter, r *http.Request, c *caller) {

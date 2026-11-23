@@ -222,6 +222,8 @@ The response always embeds the run:
 
 `mode` is `plan`, `apply` or `drift`. `trigger` is `pull_request`, `comment`, `push`, `schedule`, `rerequest` or `manual`.
 
+For GitHub stack previews, the runner sends `supports_stack_preview: true`. The server returns `verified_base_sha` for the diff and includes `run.stack_preview` with `number`, `position`, `base_ref`, `base_sha`, and `parent_sha`. The graph upload must use the verified base. After detachment, the response supplies the verified standalone base and omits `stack_preview`.
+
 ### `POST /v1/runs/{id}/graph` {#upload-graph}
 
 Uploads the scanned graph and the changed paths, and answers with the affected stacks, their waves, warnings and the matrix. Only the resolve job of the pull request that created the run may upload, and only while the run is `pending` or `planning`; `graph.repo` and `graph.sha` must match the run. A `tree_hash` equal to that of a stored graph is a cache hit, reported as `cached: true`. The body limit is 8 MB.

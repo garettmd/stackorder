@@ -104,6 +104,19 @@ func (s *Service) dispatchStacks(ctx context.Context, run store.Run, wave int, t
 		s.renderQuiet(ctx, run.ID, renderOpts{})
 		return nil
 	}
+	repo, err := s.st.GetRepo(ctx, run.RepoID)
+	if err != nil {
+		return storeErr(err, "repository of run %s", run.ID)
+	}
+	if run.Mode == v1.ModeApply && run.PRNumber > 0 {
+		client, err := s.client(ctx, repo)
+		if err != nil {
+			return err
+		}
+		if err := s.checkApplyScope(ctx, client, repo, run); err != nil {
+			return err
+		}
+	}
 	moved, err := s.transition(ctx, run, started, v1.RunPending, v1.RunPlanned)
 	if err != nil {
 		return err
@@ -116,10 +129,6 @@ func (s *Service) dispatchStacks(ctx context.Context, run store.Run, wave int, t
 		if current.Status.Terminal() {
 			return nil
 		}
-	}
-	repo, err := s.st.GetRepo(ctx, run.RepoID)
-	if err != nil {
-		return storeErr(err, "repository of run %s", run.ID)
 	}
 	nodes, err := s.graphNodes(ctx, run)
 	if err != nil {

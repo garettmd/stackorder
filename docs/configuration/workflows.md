@@ -35,6 +35,18 @@ jobs:
 - **Concurrency.** One group per PR with `cancel-in-progress: true`, so a new push cancels the plan of the previous one.
 - **Jobs.** The reusable `plan.yml` runs a `resolve` job, which checks out the full history, scans the repository, posts the graph and gets the matrix back, and a `plan` job with one matrix entry per affected stack, which checks out the entry's `sha`. Plan jobs declare no `environment`, so planning is never held behind an environment's reviewers. For a pull request from a fork it runs neither; see [Fork pull requests](#forks).
 
+### Stacked pull requests
+
+Stackorder previews native GitHub stacks on GitHub.com. The plan on an upper PR includes changes from the lower layers present in that PR's head. Terraform plans against live state. GitHub's code review still shows the focused diff for each layer. If the trunk or parent has moved ahead of the PR head, rebase the stack and rerun the plan.
+
+With `apply.stacked_prs: true` in `stackorder.yaml` on the default branch, Stackorder records the ordered PR numbers and head commits through the selected layer, along with its Git tree SHA. A change to the recorded group or trunk requires a fresh plan. Upgrade the plan CLI so it can verify the checkout against this scope. The setting currently records scope for previews.
+
+Require the Stackorder App's `stackorder/plan` status check on the branch the stack targets. Successful previews show **Action required** on that rollup. The individual Terraform stack checks show the actual plan results. GitHub rules must require the rollup to block merges. A bypassed merge starts no Stackorder apply and any existing orchestration locks remain for operator review.
+
+To deploy a layer, detach it from the GitHub stack, target the repository default branch with the intended changes, and rerun the full plan workflow in GitHub Actions. The regular apply workflow resumes once a fresh standalone plan succeeds. Use **Re-run all jobs** when stack membership or the base changes without a new head commit. The `stackorder plan` comment and individual check reruns reuse the affected stacks from a current full plan.
+
+Upgrade every Stackorder server before using native stacks, then upgrade any pinned `stackorder-version` in the calling workflow. The existing reusable workflow checks out the history the CLI needs. Leave `base-ref` empty unless it resolves to the verified stack base SHA. Leave `stacks` empty for the fresh standalone run after detaching.
+
 ### The default-branch graph {#default-graph}
 
 The server's picture of the default branch — the stack lists, the overview counts, which stacks are removed, and what drift checks and cross-repository plans schedule — comes from the graph of the default branch. A merged pull request that had a plan run moves it, but a direct push to the default branch, or a merge of a pull request that had no plan, leaves it stale until the next planned merge.

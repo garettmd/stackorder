@@ -42,6 +42,7 @@ func (staticToken) rateLimitScope() string { return "" }
 
 type request struct {
 	method     string
+	apiVersion string
 	route      string
 	path       string
 	rawURL     string
@@ -258,6 +259,9 @@ func (t *transport) once(ctx context.Context, r request, target, token string, p
 	}
 	req.Header.Set("Accept", MediaType)
 	req.Header.Set("X-GitHub-Api-Version", APIVersion)
+	if r.apiVersion != "" {
+		req.Header.Set("X-GitHub-Api-Version", r.apiVersion)
+	}
 	req.Header.Set("User-Agent", t.userAgent)
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)

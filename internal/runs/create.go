@@ -70,13 +70,6 @@ func (s *Service) createPlanRun(ctx context.Context, c *oidc.Claims, req v1.Crea
 	if err != nil {
 		return nil, err
 	}
-	head, err := s.pullHead(ctx, cl, repo, pr)
-	if err != nil {
-		return nil, err
-	}
-	if head != req.SHA {
-		return nil, principal.Wrap(principal.ErrSuperseded, "pull request #%d is at %s, not %s", pr, shortSHA(head), shortSHA(req.SHA))
-	}
 	wr, _ := c.RunIDInt()
 	attempt, _ := strconv.Atoi(c.RunAttempt)
 	params := store.CreateRunParams{
@@ -84,55 +77,90 @@ func (s *Service) createPlanRun(ctx context.Context, c *oidc.Claims, req v1.Crea
 		Trigger: v1.TriggerPullRequest, Mode: v1.ModePlan, Status: v1.RunPending,
 		RequestedBy: c.Actor, WorkflowRunID: wr, WorkflowRunAttempt: attempt,
 	}
-	run, created, err := s.findOrCreatePlanRun(ctx, params)
+	var run store.Run
+	var created bool
+	var refusal, publishErr error
+	err = s.st.InTx(ctx, func(tx *store.Store) error {
+		if err := tx.LockKey(ctx, renderKey(store.Run{RepoID: repo.ID, PRNumber: pr})); err != nil {
+			return err
+		}
+		pull, err := cl.GetPull(ctx, repo.FullName, pr)
+		if err != nil {
+			return fmt.Errorf("runs: pull request %s#%d: %w", repo.FullName, pr, err)
+		}
+		if pull.HeadSHA != req.SHA {
+			return principal.Wrap(principal.ErrSuperseded, "pull request #%d is at %s, not %s", pr, shortSHA(pull.HeadSHA), shortSHA(req.SHA))
+		}
+		scope, changed, err := s.syncPRScope(ctx, tx, cl, repo, pull)
+		if err != nil {
+			return err
+		}
+		if scope.Generation != uuid.Nil {
+			params.PlanGeneration, params.StackPreview = &scope.Generation, scope.Preview
+			if scope.Preview != nil {
+				params.BaseSHA = scope.Preview.BaseSHA
+			} else {
+				params.BaseSHA = scope.ParentSHA
+			}
+			switch {
+			case !req.SupportsStackPreview:
+				refusal = principal.Wrap(principal.ErrConflict, "upgrade the Stackorder CLI in the plan workflow and rerun it")
+			case params.BaseSHA == "" || scope.Preview != nil && scope.Preview.ParentSHA == "":
+				refusal = principal.Wrap(principal.ErrConflict, "GitHub has not supplied the plan base and parent commits; rerun the full plan workflow")
+			}
+			if changed || scope.CheckID == 0 || refusal != nil {
+				publishErr = s.publishScopeChange(ctx, tx, cl, repo, pr, scope)
+			}
+			if refusal != nil {
+				return nil
+			}
+		}
+		run, created, err = findOrCreatePlanRun(ctx, tx, params)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
+	if publishErr != nil {
+		s.log.WarnContext(ctx, "publish pull request plan scope", "repo", repo.FullName, "pr", pr, "error", publishErr)
+	}
+	if refusal != nil {
+		return nil, refusal
+	}
+
 	if created {
 		s.m.RunCreated(run.Trigger, run.Mode)
 		s.m.RunStatusChanged(run.Status, run.Trigger, run.Mode)
-		s.supersede(ctx, repo, pr, head)
+		s.supersede(ctx, repo, pr, req.SHA)
 	} else if wr != 0 && (run.WorkflowRunID != wr || run.WorkflowRunAttempt != attempt) {
 		if err := s.st.SetRunWorkflowRun(ctx, run.ID, wr, attempt); err != nil {
 			return nil, storeErr(err, "record workflow run of run %s", run.ID)
 		}
 	}
-	return s.createResponse(ctx, run.ID, !created)
+	resp, err := s.createResponse(ctx, run.ID, !created)
+	if err == nil && run.PlanGeneration != nil {
+		resp.VerifiedBaseSHA = run.BaseSHA
+	}
+	return resp, err
 }
 
-func (s *Service) findOrCreatePlanRun(ctx context.Context, p store.CreateRunParams) (store.Run, bool, error) {
-	var (
-		out     store.Run
-		created bool
-	)
-	key := fmt.Sprintf("run:%d:%s:%d:%s", p.RepoID, p.SHA, p.PRNumber, p.Mode)
-	err := s.st.InTx(ctx, func(tx *store.Store) error {
-		if err := tx.LockKey(ctx, key); err != nil {
-			return err
-		}
-		run, err := tx.FindOpenRun(ctx, p.RepoID, p.SHA, p.PRNumber, p.Mode)
-		switch {
-		case err == nil && reusablePlanRun(run, p):
-			out = run
-			return nil
-		case err != nil && !errors.Is(err, store.ErrNotFound):
-			return err
-		}
-		out, err = tx.CreateRun(ctx, p)
-		created = err == nil
-		return err
-	})
-	if err != nil {
+func findOrCreatePlanRun(ctx context.Context, tx *store.Store, p store.CreateRunParams) (store.Run, bool, error) {
+	run, err := tx.FindOpenRun(ctx, p.RepoID, p.SHA, p.PRNumber, p.Mode)
+	switch {
+	case err == nil && reusablePlanRun(run, p):
+		return run, false, nil
+	case err != nil && !errors.Is(err, store.ErrNotFound):
 		return store.Run{}, false, storeErr(err, "plan run for %s", shortSHA(p.SHA))
 	}
-	return out, created, nil
+	run, err = tx.CreateRun(ctx, p)
+	return run, err == nil, err
 }
 
 func reusablePlanRun(run store.Run, p store.CreateRunParams) bool {
-	if run.Trigger != v1.TriggerPullRequest {
+	if run.Trigger != v1.TriggerPullRequest || !sameGeneration(run.PlanGeneration, p.PlanGeneration) {
 		return false
 	}
-	if run.Status == v1.RunPending || run.Status == v1.RunPlanning {
+	if run.PlanGeneration == nil && (run.Status == v1.RunPending || run.Status == v1.RunPlanning) {
 		return true
 	}
 	return run.WorkflowRunID == p.WorkflowRunID && run.WorkflowRunAttempt == p.WorkflowRunAttempt
@@ -215,6 +243,15 @@ func (s *Service) GetRunForPrincipal(ctx context.Context, p principal.Principal,
 		case eventWorkflowDispatch:
 			if err := s.bindJob(ctx, run, repo, c, nil, false); err != nil {
 				return nil, err
+			}
+			if run.Mode == v1.ModeApply && run.PRNumber > 0 {
+				client, err := s.client(ctx, repo)
+				if err != nil {
+					return nil, err
+				}
+				if err := s.checkApplyScope(ctx, client, repo, run); err != nil {
+					return nil, err
+				}
 			}
 		default:
 			return nil, principal.Wrap(principal.ErrForbidden, "claim event_name %q cannot read runs", c.EventName)

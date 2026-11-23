@@ -313,6 +313,8 @@ func migrationLoss(version uint) string {
 		return "drops events.trace_context and jobs.trace_context, the queued W3C trace context; observability only, no run or state data"
 	case 16:
 		return "drops the API-key scopes (api_keys.read_only, installation_id, expires_at): every read-only, installation-scoped or expiring key is then honoured as a FULL, never-expiring administrator. Revoke every scoped or expiring key BEFORE reverting — list them with `stackorder-server api-key list` and revoke each with `stackorder-server api-key revoke <id>`"
+	case 17:
+		return "drops stored GitHub PR preview scopes and run scope identifiers; detach active GitHub stacks before rolling back the apply guard"
 	default:
 		return "drops the tables, columns and indexes this migration added and the data in them; see the rollback table in the upgrades-and-backups guide"
 	}

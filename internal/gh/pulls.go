@@ -3,6 +3,7 @@ package gh
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"strings"
 	"time"
 )
@@ -63,28 +64,36 @@ type PullBranch struct {
 	Repo *Repository
 }
 
+// PullRequestStack is the native GitHub stack membership of a pull request.
+type PullRequestStack struct {
+	Number   int       `json:"number"`
+	Position int       `json:"position"`
+	Base     BranchRef `json:"base"`
+}
+
 // PullRequest is a pull request. HeadSHA, HeadRef, BaseSHA and BaseRef are
 // the head.sha, head.ref, base.sha and base.ref of GitHub's payload; Head and
 // Base carry the repositories, so Head.Repo.Fork tells a fork PR apart.
 type PullRequest struct {
-	Number         int        `json:"number"`
-	Title          string     `json:"title,omitempty"`
-	State          string     `json:"state"`
-	Merged         bool       `json:"merged"`
-	MergeCommitSHA string     `json:"merge_commit_sha,omitempty"`
-	Mergeable      *bool      `json:"mergeable"`
-	MergeableState string     `json:"mergeable_state,omitempty"`
-	Draft          bool       `json:"draft"`
-	HTMLURL        string     `json:"html_url,omitempty"`
-	User           User       `json:"user"`
-	Labels         Labels     `json:"labels"`
-	MergedAt       *time.Time `json:"merged_at,omitempty"`
-	HeadSHA        string     `json:"-"`
-	HeadRef        string     `json:"-"`
-	BaseSHA        string     `json:"-"`
-	BaseRef        string     `json:"-"`
-	Head           PullBranch `json:"-"`
-	Base           PullBranch `json:"-"`
+	Number         int               `json:"number"`
+	Title          string            `json:"title,omitempty"`
+	State          string            `json:"state"`
+	Merged         bool              `json:"merged"`
+	MergeCommitSHA string            `json:"merge_commit_sha,omitempty"`
+	Mergeable      *bool             `json:"mergeable"`
+	MergeableState string            `json:"mergeable_state,omitempty"`
+	Draft          bool              `json:"draft"`
+	HTMLURL        string            `json:"html_url,omitempty"`
+	User           User              `json:"user"`
+	Labels         Labels            `json:"labels"`
+	MergedAt       *time.Time        `json:"merged_at,omitempty"`
+	Stack          *PullRequestStack `json:"stack,omitempty"`
+	HeadSHA        string            `json:"-"`
+	HeadRef        string            `json:"-"`
+	BaseSHA        string            `json:"-"`
+	BaseRef        string            `json:"-"`
+	Head           PullBranch        `json:"-"`
+	Base           PullBranch        `json:"-"`
 }
 
 type pullAlias PullRequest
@@ -154,10 +163,68 @@ func (c *Client) GetPull(ctx context.Context, repo string, number int) (*PullReq
 		return nil, err
 	}
 	var pr PullRequest
-	if err := c.get(ctx, "/repos/{owner}/{repo}/pulls/{pull_number}", rp+"/pulls/"+itoa(number), &pr); err != nil {
+	err = c.getWithStackMetadata(ctx, "/repos/{owner}/{repo}/pulls/{pull_number}", rp+"/pulls/"+itoa(number), &pr)
+	if err != nil {
 		return nil, err
 	}
 	return &pr, nil
+}
+
+func (c *Client) getWithStackMetadata(ctx context.Context, route, path string, out any) error {
+	r := request{method: http.MethodGet, route: route, path: path, auth: c.auth}
+	if c.t.base.Hostname() == "api.github.com" {
+		r.apiVersion = "2026-03-10"
+	}
+	return c.t.call(ctx, r, out)
+}
+
+// PullStack describes GitHub's ordered list of pull requests in a stack.
+type PullStack struct {
+	Number int           `json:"number"`
+	Open   bool          `json:"open"`
+	Base   BranchRef     `json:"base"`
+	Pulls  []PullRequest `json:"pull_requests"`
+}
+
+// OpenPrefix returns the group's open pulls through selected, in merge order.
+// It refuses inconsistent metadata from the stack and pull endpoints.
+func (s *PullStack) OpenPrefix(selected *PullRequest) []PullRequest {
+	m := selected.Stack
+	if m == nil || s.Number != m.Number || !s.Open || m.Base.SHA == "" ||
+		s.Base.Ref != m.Base.Ref || s.Base.SHA != "" && s.Base.SHA != m.Base.SHA ||
+		m.Position < 1 || m.Position > len(s.Pulls) {
+		return nil
+	}
+	prefix := s.Pulls[:m.Position]
+	tip := prefix[len(prefix)-1]
+	if tip.Number != selected.Number || tip.HeadSHA != selected.HeadSHA || tip.HeadRef != selected.HeadRef ||
+		tip.BaseSHA != selected.BaseSHA || tip.BaseRef != selected.BaseRef {
+		return nil
+	}
+	parentSHA, parentRef := m.Base.SHA, m.Base.Ref
+	seen := make(map[int]bool, len(prefix))
+	for _, pull := range prefix {
+		if pull.Number < 1 || seen[pull.Number] || pull.State != IssueOpen || pull.Merged ||
+			pull.MergedAt != nil || pull.IsFork() || pull.BaseSHA != parentSHA || pull.BaseRef != parentRef ||
+			pull.HeadSHA == "" || pull.HeadSHA == parentSHA || pull.HeadRef == "" {
+			return nil
+		}
+		seen[pull.Number] = true
+		parentSHA, parentRef = pull.HeadSHA, pull.HeadRef
+	}
+	return prefix
+}
+
+func (c *Client) GetPullStack(ctx context.Context, repo string, number int) (*PullStack, error) {
+	rp, err := repoPath(repo)
+	if err != nil {
+		return nil, err
+	}
+	var stack PullStack
+	if err := c.getWithStackMetadata(ctx, "/repos/{owner}/{repo}/stacks/{stack_number}", rp+"/stacks/"+itoa(number), &stack); err != nil {
+		return nil, err
+	}
+	return &stack, nil
 }
 
 // ListReviews returns every review of a pull request, oldest first.

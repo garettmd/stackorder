@@ -354,15 +354,34 @@ type CreateRunRequest struct {
 	RunID string `json:"run_id,omitempty"`
 	// Stacks names the stacks of a manual run started with an API key from
 	// outside Actions; the server takes their locks before answering.
-	Stacks []string `json:"stacks,omitempty"`
+	Stacks               []string `json:"stacks,omitempty"`
+	SupportsStackPreview bool     `json:"supports_stack_preview,omitempty"`
+}
+
+// StackPreview is the GitHub stack scope verified by the server for a plan.
+type StackPreview struct {
+	Number    int          `json:"number"`
+	Position  int          `json:"position"`
+	BaseRef   string       `json:"base_ref"`
+	BaseSHA   string       `json:"base_sha"`
+	ParentSHA string       `json:"parent_sha"`
+	TreeSHA   string       `json:"tree_sha,omitempty"`
+	Layers    []StackLayer `json:"layers,omitempty"`
+}
+
+// StackLayer identifies one pull request in the cumulative plan, in merge order.
+type StackLayer struct {
+	Number  int    `json:"number"`
+	HeadSHA string `json:"head_sha"`
 }
 
 // CreateRunResponse is the body returned by POST /v1/runs.
 type CreateRunResponse struct {
-	RunID    string    `json:"run_id"`
-	Status   RunStatus `json:"status"`
-	Existing bool      `json:"existing"`
-	Run      *Run      `json:"run,omitempty"`
+	RunID           string    `json:"run_id"`
+	Status          RunStatus `json:"status"`
+	Existing        bool      `json:"existing"`
+	VerifiedBaseSHA string    `json:"verified_base_sha,omitempty"`
+	Run             *Run      `json:"run,omitempty"`
 }
 
 // GraphUploadRequest is the body of POST /v1/runs/{id}/graph.
@@ -370,6 +389,7 @@ type GraphUploadRequest struct {
 	Graph        Graph       `json:"graph"`
 	ChangedPaths []string    `json:"changed_paths"`
 	BaseSHA      string      `json:"base_sha,omitempty"`
+	CheckoutTree string      `json:"checkout_tree,omitempty"`
 	Config       *RepoConfig `json:"config,omitempty"`
 	// Stacks restricts the run to these stack keys, for a
 	// "stackorder plan stacks/a stacks/b" comment.
@@ -607,21 +627,22 @@ type LockInfo struct {
 
 // Run is the human and automation view of a run.
 type Run struct {
-	ID          string     `json:"id"`
-	Repo        string     `json:"repo"`
-	SHA         string     `json:"sha"`
-	BaseSHA     string     `json:"base_sha,omitempty"`
-	PRNumber    int        `json:"pr_number,omitempty"`
-	Trigger     Trigger    `json:"trigger"`
-	Mode        RunMode    `json:"mode"`
-	Status      RunStatus  `json:"status"`
-	RequestedBy string     `json:"requested_by,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
-	StartedAt   *time.Time `json:"started_at,omitempty"`
-	FinishedAt  *time.Time `json:"finished_at,omitempty"`
-	Waves       int        `json:"waves"`
-	CurrentWave int        `json:"current_wave"`
-	Stacks      []RunStack `json:"stacks,omitempty"`
+	ID           string        `json:"id"`
+	Repo         string        `json:"repo"`
+	SHA          string        `json:"sha"`
+	BaseSHA      string        `json:"base_sha,omitempty"`
+	PRNumber     int           `json:"pr_number,omitempty"`
+	StackPreview *StackPreview `json:"stack_preview,omitempty"`
+	Trigger      Trigger       `json:"trigger"`
+	Mode         RunMode       `json:"mode"`
+	Status       RunStatus     `json:"status"`
+	RequestedBy  string        `json:"requested_by,omitempty"`
+	CreatedAt    time.Time     `json:"created_at"`
+	StartedAt    *time.Time    `json:"started_at,omitempty"`
+	FinishedAt   *time.Time    `json:"finished_at,omitempty"`
+	Waves        int           `json:"waves"`
+	CurrentWave  int           `json:"current_wave"`
+	Stacks       []RunStack    `json:"stacks,omitempty"`
 	// StackCount, StackKeys and Summary sum up the stacks of a run in run
 	// lists, which omit Stacks: how many the run covers, the first of their
 	// keys in wave order, and their summed plan summaries once one has any.

@@ -50,6 +50,13 @@ func checkPullClaims(c *oidc.Claims, run store.Run) error {
 	if !ok || run.PRNumber == 0 || pr != run.PRNumber {
 		return principal.Wrap(principal.ErrForbidden, "claim ref is %q, want %q", c.Ref, "refs/pull/"+strconv.Itoa(run.PRNumber)+"/merge")
 	}
+	if run.PlanGeneration != nil {
+		id, _ := c.RunIDInt()
+		attempt, _ := strconv.Atoi(c.RunAttempt)
+		if run.WorkflowRunID != id || run.WorkflowRunAttempt != attempt {
+			return principal.Wrap(principal.ErrSuperseded, "this pull request plan belongs to another workflow attempt")
+		}
+	}
 	return nil
 }
 

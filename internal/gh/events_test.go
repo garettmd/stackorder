@@ -1,6 +1,7 @@
 package gh_test
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -257,4 +258,22 @@ func TestEventCommonWithoutInstallationOrRepository(t *testing.T) {
 	assert.Zero(t, c.InstallationID())
 	assert.Empty(t, c.RepoFullName())
 	assert.Same(t, &c, c.Common())
+}
+
+func TestNativeStackMetadata(t *testing.T) {
+	payload := []byte(`{"action":"stacked","number":9,"pull_request":{"number":9,"base":{"ref":"parent","sha":"parent-sha"},"stack":{"number":4,"position":2,"size":3,"base":{"ref":"main","sha":"trunk-sha"}}}}`)
+	event, err := gh.ParseEvent(gh.EventPullRequest, payload)
+	require.NoError(t, err)
+	pr := event.(*gh.PullRequestEvent).PullRequest
+	require.NotNil(t, pr.Stack)
+	assert.Equal(t, 4, pr.Stack.Number)
+	assert.Equal(t, 2, pr.Stack.Position)
+	assert.Equal(t, gh.BranchRef{Ref: "main", SHA: "trunk-sha"}, pr.Stack.Base)
+	assert.Equal(t, "parent-sha", pr.BaseSHA)
+
+	wire, err := json.Marshal(pr)
+	require.NoError(t, err)
+	var roundTrip gh.PullRequest
+	require.NoError(t, json.Unmarshal(wire, &roundTrip))
+	assert.Equal(t, pr.Stack, roundTrip.Stack)
 }

@@ -40,11 +40,11 @@ func TestMigrateUpDownUp(t *testing.T) {
 		wantTables int
 		wantVer    uint
 	}{
-		{"up", s.Migrate, 23, 16},
-		{"up again is a no-op", s.Migrate, 23, 16},
+		{"up", s.Migrate, 24, 17},
+		{"up again is a no-op", s.Migrate, 24, 17},
 		{"down", s.MigrateDown, 0, 0},
 		{"down again is a no-op", s.MigrateDown, 0, 0},
-		{"up after down", s.Migrate, 23, 16},
+		{"up after down", s.Migrate, 24, 17},
 	}
 	for _, step := range steps {
 		require.NoError(t, step.apply(ctx), step.name)
@@ -126,7 +126,7 @@ func TestMigrateDownToPopulatedRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 
 	populateForDowngrade(f)
-	require.Equal(t, 23, tableCount(t, f.s))
+	require.Equal(t, 24, tableCount(t, f.s))
 
 	for v := latest; v > 0; v-- {
 		reverted, err := f.s.MigrateDownTo(ctx, v-1)
@@ -143,7 +143,7 @@ func TestMigrateDownToPopulatedRoundTrip(t *testing.T) {
 	got, _, err := f.s.SchemaVersion(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, latest, got)
-	assert.Equal(t, 23, tableCount(t, f.s), "every table returns after migrating up again")
+	assert.Equal(t, 24, tableCount(t, f.s), "every table returns after migrating up again")
 }
 
 func TestMigrateDownTo(t *testing.T) {
@@ -305,7 +305,7 @@ func TestForceVersionRecoversDirtyRollback(t *testing.T) {
 	assert.False(t, dirty)
 
 	require.NoError(t, s.Migrate(ctx), "re-applies the migration that failed, and the rest")
-	assert.Equal(t, 23, tableCount(t, s))
+	assert.Equal(t, 24, tableCount(t, s))
 	ver, dirty, err = s.SchemaVersion(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, target, ver)
@@ -338,7 +338,7 @@ func TestForceVersionZeroResetsToPristine(t *testing.T) {
 	assert.False(t, dirty)
 
 	require.NoError(t, s.Migrate(ctx), "migrate runs from the first migration")
-	assert.Equal(t, 23, tableCount(t, s))
+	assert.Equal(t, 24, tableCount(t, s))
 	ver, _, err = s.SchemaVersion(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, target, ver)
@@ -430,7 +430,7 @@ func TestMigrateConcurrentServers(t *testing.T) {
 	for _, err := range errs {
 		require.NoError(t, err)
 	}
-	assert.Equal(t, 23, tableCount(t, stores[0]))
+	assert.Equal(t, 24, tableCount(t, stores[0]))
 }
 
 func TestMigrateWithSingleConnectionPool(t *testing.T) {
@@ -460,7 +460,7 @@ func TestMigrateWithSingleConnectionPool(t *testing.T) {
 	t.Cleanup(s.Close)
 	ver, dirty, err := s.SchemaVersion(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, uint(16), ver)
+	assert.Equal(t, uint(17), ver)
 	assert.False(t, dirty)
 }
 

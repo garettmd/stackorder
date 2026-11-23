@@ -54,6 +54,9 @@ func runHead(title string, run v1.Run, stacks []v1.RunStack, o Options) string {
 	var b strings.Builder
 	b.WriteString("### " + title + ": " + runStatusWord(run.Status) + "\n\n")
 	b.WriteString(runMetaLine(run, o) + "\n\n")
+	if run.StackPreview != nil {
+		b.WriteString(StackPreviewNotice(run.StackPreview) + "\n\n")
+	}
 	p := phaseOf(run)
 	t := tallyOf(stacks, p)
 	switch run.Status {
@@ -210,4 +213,10 @@ func omittedNote(n int) string {
 		return ""
 	}
 	return "Plan output for " + plural(n, "more stack") + " is not shown, to stay within GitHub's comment size limit; see the job logs.\n\n"
+}
+
+// StackPreviewNotice describes the GitHub scope of a cumulative plan.
+func StackPreviewNotice(scope *v1.StackPreview) string {
+	return fmt.Sprintf("**Cumulative preview · GitHub stack #%d, layer %d.** The plan compares the PR head with %s at %s (immediate parent %s). It covers this layer and the lower-layer changes present in its head. Stackorder applies are disabled while the PR is in the stack.",
+		scope.Number, scope.Position, code(scope.BaseRef), code(shortSHA(scope.BaseSHA)), code(shortSHA(scope.ParentSHA)))
 }

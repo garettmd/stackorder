@@ -80,11 +80,13 @@ A downgrade is purely additive to undo only when every migration it reverts is a
 | v0.4.0 | 8 |
 | v0.5.0 | 9 |
 | v0.6.0 | 16 |
+| This release | 17 |
 
-Reverting down from version 16 drops, one version at a time:
+Reverting down from version 17 drops, one version at a time:
 
 | To version | Reverting drops |
 | --- | --- |
+| 16 | Stored GitHub PR preview scopes and run scope identifiers. Detach active GitHub stacks before rolling back the server that enforces preview-only applies. |
 | 15 | **The API-key scopes, and with them every restriction on every key.** `api_keys.read_only`, `api_keys.installation_id` and `api_keys.expires_at` are dropped, so once the schema is below 16 — and under the older release, which never read these columns — every read-only, installation-scoped or expiring key is honoured as a full, installation-wide, never-expiring administrator, including past its expiry. **Revoke every scoped or expiring key _before_ you run `migrate --down` below 16**: list the keys and their scopes with `stackorder-server api-key list` and revoke each restricted one with `stackorder-server api-key revoke <id>`. Unscoped keys are unaffected — they were full administrators already. |
 | 14 | The trace context carried across the work queue (`events.trace_context` and `jobs.trace_context`); queued and in-flight rows lose the stored W3C trace context, so a worker span no longer continues the trace of the request or job that enqueued the row. Observability only — no run or state data is affected. |
 | 13 | The observation time that orders each installation's `suspend`/`unsuspend` webhooks in receive order (`installations.suspend_observed_at`); the older release resolves `suspend` and `unsuspend` by processing order again, as v0.5.0 did, and the daily installation sync settles each installation's suspension on its next run. |

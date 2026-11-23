@@ -104,6 +104,7 @@ type ModulesConfig struct {
 // ApplyConfig is the apply gate policy.
 type ApplyConfig struct {
 	Mode                   ApplyMode `json:"mode" yaml:"mode"`
+	StackedPRs             bool      `json:"stacked_prs,omitempty" yaml:"stacked_prs"`
 	RequireApprovals       int       `json:"require_approvals" yaml:"require_approvals"`
 	RequireCodeownerReview bool      `json:"require_codeowner_review,omitempty" yaml:"require_codeowner_review"`
 	AllowedTeams           []string  `json:"allowed_teams,omitempty" yaml:"allowed_teams"`

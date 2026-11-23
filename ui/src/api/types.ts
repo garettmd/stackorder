@@ -319,6 +319,17 @@ export interface RunStack {
   finished_at?: string;
 }
 
+/** The GitHub stack scope verified by the server for a plan. */
+export interface StackPreview {
+  number: number;
+  position: number;
+  base_ref: string;
+  base_sha: string;
+  parent_sha: string;
+  tree_sha?: string;
+  layers?: { number: number; head_sha: string }[];
+}
+
 /** The human and automation view of a run. */
 export interface Run {
   id: string;
@@ -326,6 +337,7 @@ export interface Run {
   sha: string;
   base_sha?: string;
   pr_number?: number;
+  stack_preview?: StackPreview;
   trigger: Trigger;
   mode: RunMode;
   status: RunStatus;
@@ -348,6 +360,7 @@ export interface CreateRunResponse {
   run_id: string;
   status: RunStatus;
   existing: boolean;
+  verified_base_sha?: string;
   run?: Run;
 }
 

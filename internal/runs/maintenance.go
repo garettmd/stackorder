@@ -140,6 +140,19 @@ func (s *Service) staleApply(ctx context.Context, repo store.Repo, run store.Run
 	if err != nil {
 		return "", fmt.Errorf("runs: pull request %s#%d: %w", repo.FullName, run.PRNumber, err)
 	}
+	if pull.Stack != nil {
+		return stackPreviewOnly, nil
+	}
+	scope, err := prScope(ctx, s.st, repo.ID, run.PRNumber)
+	if err != nil {
+		return "", err
+	}
+	if scope.Generation != uuid.Nil && pull.BaseRef != repo.DefaultBranch {
+		return stackRetarget, nil
+	}
+	if !applyScopeMatches(scope, pull, run) {
+		return stackReplan, nil
+	}
 	if run.Trigger == v1.TriggerComment {
 		switch {
 		case pull.Merged || pull.MergedAt != nil || pull.State != gh.IssueOpen:
@@ -873,6 +886,27 @@ func (s *Service) Rerun(ctx context.Context, actor string, runID string) (*v1.Ru
 	if err := s.authorizeActor(ctx, actor, repo); err != nil {
 		return nil, err
 	}
+	if run.PRNumber > 0 {
+		c, err := s.client(ctx, repo)
+		if err != nil {
+			return nil, err
+		}
+		pull, err := c.GetPull(ctx, repo.FullName, run.PRNumber)
+		if err != nil {
+			return nil, err
+		}
+		scope, err := prScope(ctx, s.st, repo.ID, run.PRNumber)
+		if err != nil {
+			return nil, err
+		}
+		preview, err := liveStackPreview(ctx, c, repo, pull)
+		if err != nil {
+			return nil, err
+		}
+		if !scopeMatches(scope, pull, preview) || !currentPlanScope(scope, run.PlanGeneration, run.SHA) {
+			return nil, principal.Wrap(principal.ErrSuperseded, "%s", stackReplan)
+		}
+	}
 	rows, err := s.st.GetRunStacks(ctx, run.ID)
 	if err != nil {
 		return nil, storeErr(err, "stacks of run %s", run.ID)
@@ -892,7 +926,7 @@ func (s *Service) Rerun(ctx context.Context, actor string, runID string) (*v1.Ru
 	}
 	next, refusal, err := s.startServerPlan(ctx, serverPlan{
 		repo: repo, pr: run.PRNumber, sha: run.SHA, baseSHA: run.BaseSHA, graph: g, graphID: *run.GraphID,
-		keys: keys, prior: prior, trigger: v1.TriggerRerequest, requester: actor,
+		keys: keys, prior: prior, trigger: v1.TriggerRerequest, requester: actor, generation: run.PlanGeneration, preview: run.StackPreview,
 	})
 	if err != nil {
 		return nil, err

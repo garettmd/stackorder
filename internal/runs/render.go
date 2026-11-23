@@ -77,6 +77,16 @@ func (s *Service) renderLocked(ctx context.Context, tx *store.Store, c *gh.Clien
 		return nil, storeErr(err, "repository of run %s", id)
 	}
 	w := &checkWriter{s: s, tx: tx, c: c, repo: repo}
+	if run.PRNumber > 0 && run.Status != v1.RunSuperseded {
+		scope, err := prScope(ctx, tx, run.RepoID, run.PRNumber)
+		if err != nil {
+			return nil, err
+		}
+		if run.Mode == v1.ModePlan && !currentPlanScope(scope, run.PlanGeneration, run.SHA) ||
+			run.Mode == v1.ModeApply && scope.Generation != uuid.Nil && !sameGeneration(&scope.Generation, run.PlanGeneration) {
+			return nil, nil
+		}
+	}
 	if run.Status == v1.RunSuperseded {
 		if o.supersededBy != "" {
 			w.superseded(ctx, &run, o.supersededBy)
@@ -137,21 +147,69 @@ func (s *Service) renderRollup(ctx context.Context, w *checkWriter, run store.Ru
 		owner = view.runs[0]
 	}
 	rollup := report.RollupCheck(view.v1(), opts)
-	w.write(ctx, &owner, report.CheckPlan, rollup)
-	if view.nothingAffected() && repoConfig(w.repo).Apply.Mode != v1.ApplyOnMerge {
+	scope, err := prScope(ctx, w.tx, run.RepoID, run.PRNumber)
+	if err != nil {
+		return err
+	}
+	if (scope.Preview == nil || repoConfig(w.repo).Apply.StackedPRs) &&
+		(rollup.Conclusion == report.ConclusionSuccess || rollup.Conclusion == report.ConclusionNeutral) {
+		pull, err := w.c.GetPull(ctx, w.repo.FullName, run.PRNumber)
+		if err != nil {
+			return err
+		}
+		if pull.State == gh.IssueOpen {
+			current, changed, err := s.syncPRScope(ctx, w.tx, w.c, w.repo, pull)
+			if err != nil {
+				return err
+			}
+			if changed {
+				if err := s.publishScopeChange(ctx, w.tx, w.c, w.repo, run.PRNumber, current); err != nil {
+					w.errs = append(w.errs, err)
+				}
+				return nil
+			}
+		}
+	}
+	if scope.Generation == uuid.Nil {
+		w.write(ctx, &owner, report.CheckPlan, rollup)
+	} else if err := s.writeScopeCheck(ctx, w, run.PRNumber, scope, owner, scopeRollup(rollup, scope.Preview)); err != nil {
+		w.errs = append(w.errs, err)
+	}
+	if scope.Preview == nil && (scope.Generation == uuid.Nil || scope.ParentRef == w.repo.DefaultBranch) && view.nothingAffected() && repoConfig(w.repo).Apply.Mode != v1.ApplyOnMerge {
 		w.write(ctx, &owner, report.CheckApply, rollup)
 	}
 	return nil
 }
 
 func (s *Service) renderSticky(ctx context.Context, w *checkWriter, repo store.Repo, pr int, opts report.Options) error {
-	plan, ok, err := latestPlanRun(ctx, w.tx, repo.ID, pr)
-	if err != nil || !ok {
-		return err
-	}
-	view, err := stickyPlan(ctx, w.tx, plan)
+	scope, err := prScope(ctx, w.tx, repo.ID, pr)
 	if err != nil {
 		return err
+	}
+	var view v1.Run
+	if scope.Generation != uuid.Nil {
+		pv, err := planViewAt(ctx, w.tx, repo.ID, pr, scope.HeadSHA)
+		if err != nil {
+			return err
+		}
+		if len(pv.runs) == 0 {
+			body := report.Marker + "\n" + stackReplan
+			if scope.Preview != nil {
+				body += "\n\n" + report.StackPreviewNotice(scope.Preview)
+			}
+			_, err := w.c.UpsertStickyComment(ctx, repo.FullName, pr, report.Marker, body)
+			return err
+		}
+		view = pv.v1()
+	} else {
+		plan, ok, err := latestPlanRun(ctx, w.tx, repo.ID, pr)
+		if err != nil || !ok {
+			return err
+		}
+		view, err = stickyPlan(ctx, w.tx, plan)
+		if err != nil {
+			return err
+		}
 	}
 	applies, err := pullApplies(ctx, w.tx, repo.ID, pr)
 	if err != nil {
@@ -442,6 +500,10 @@ type planView struct {
 }
 
 func planViewAt(ctx context.Context, db *store.Store, repoID int64, pr int, sha string) (planView, error) {
+	scope, err := prScope(ctx, db, repoID, pr)
+	if err != nil {
+		return planView{}, err
+	}
 	runs, _, err := db.ListRuns(ctx, store.RunFilter{RepoID: repoID, PRNumber: pr, SHA: sha, Mode: v1.ModePlan, Limit: 50})
 	if err != nil {
 		return planView{}, storeErr(err, "plan runs of pull request %d", pr)
@@ -449,7 +511,7 @@ func planViewAt(ctx context.Context, db *store.Store, repoID int64, pr int, sha 
 	v := planView{stored: map[string]store.RunStack{}}
 	seen := map[string]bool{}
 	for _, r := range runs {
-		if r.Status == v1.RunSuperseded {
+		if r.Status == v1.RunSuperseded || !currentPlanScope(scope, r.PlanGeneration, sha) {
 			continue
 		}
 		v.runs = append(v.runs, r)

@@ -37,28 +37,29 @@ type fakeServer struct {
 	t   *testing.T
 	srv *httptest.Server
 
-	mu        sync.Mutex
-	runID     string
-	resolve   v1.ResolveResponse
-	run       v1.Run
-	released  map[string][]v1.LockInfo
-	fail      map[string]int
-	failCode  map[string]string
-	creates   []v1.CreateRunRequest
-	graphs    []v1.GraphUploadRequest
-	records   []v1.RecordGraphRequest
-	recordSet bool
-	record    v1.RecordGraphResponse
-	results   []postedResult
-	checks    []postedCheck
-	unlocks   []v1.UnlockRequest
-	checkRuns []checkRunRequest
-	auth      map[string][]string
-	audiences []string
-	hits      map[string]int
-	bodies    map[string][][]byte
-	rejects   map[string][]rejection
-	delays    map[string][]time.Duration
+	mu           sync.Mutex
+	runID        string
+	verifiedBase string
+	resolve      v1.ResolveResponse
+	run          v1.Run
+	released     map[string][]v1.LockInfo
+	fail         map[string]int
+	failCode     map[string]string
+	creates      []v1.CreateRunRequest
+	graphs       []v1.GraphUploadRequest
+	records      []v1.RecordGraphRequest
+	recordSet    bool
+	record       v1.RecordGraphResponse
+	results      []postedResult
+	checks       []postedCheck
+	unlocks      []v1.UnlockRequest
+	checkRuns    []checkRunRequest
+	auth         map[string][]string
+	audiences    []string
+	hits         map[string]int
+	bodies       map[string][][]byte
+	rejects      map[string][]rejection
+	delays       map[string][]time.Duration
 }
 
 func newFakeServer(t *testing.T) *fakeServer {
@@ -80,7 +81,7 @@ func newFakeServer(t *testing.T) *fakeServer {
 		var req v1.CreateRunRequest
 		err := json.NewDecoder(r.Body).Decode(&req)
 		f.creates = append(f.creates, req)
-		return v1.CreateRunResponse{RunID: f.runID, Status: v1.RunPending}, err
+		return v1.CreateRunResponse{RunID: f.runID, Status: v1.RunPending, VerifiedBaseSHA: f.verifiedBase, Run: &f.run}, err
 	}))
 	mux.HandleFunc("POST /v1/runs/{id}/graph", f.route("graph", func(r *http.Request) (any, error) {
 		var req v1.GraphUploadRequest
